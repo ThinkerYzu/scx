@@ -704,7 +704,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let task_data = maps.task_data();
         let now_mono = now_monotonic();
 
-        for pid in pids.iter() {
+        /* for pid in pids.iter() {
             let key = unsafe { std::mem::transmute::<i32, [u8; 4]>(*pid) };
 
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
@@ -740,7 +740,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     },
                 );
             }
-        }
+        } */
 
         Ok(())
     }

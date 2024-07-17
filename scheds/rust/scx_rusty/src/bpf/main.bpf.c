@@ -154,7 +154,8 @@ const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
 /* Map pid -> task_ctx */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, pid_t);
+        __uint(key_size, sizeof(u64));
+	__type(key, u64);
 	__type(value, struct task_ctx);
 	__uint(max_entries, 1000000);
 	__uint(map_flags, 0);
@@ -180,7 +181,7 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
 	s32 pid = p->pid;
 
-	return bpf_map_lookup_elem(&task_data, &pid);
+	return bpf_map_lookup_elem(&task_data, (u64*)&p);
 }
 
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
@@ -1547,6 +1548,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	struct task_ctx *map_value;
 	long ret;
 	pid_t pid;
+        void *pp = p;
 
 	pid = p->pid;
 
@@ -1555,7 +1557,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	 * fail spuriously due to BPF recursion protection triggering
 	 * unnecessarily.
 	 */
-	ret = bpf_map_update_elem(&task_data, &pid, &taskc, 0 /*BPF_NOEXIST*/);
+	ret = bpf_map_update_elem(&task_data, (u64*)&pp, &taskc, 0 /*BPF_NOEXIST*/);
 	if (ret) {
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return ret;
@@ -1568,20 +1570,20 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	 * Read the entry from the map immediately so we can add the cpumask
 	 * with bpf_kptr_xchg().
 	 */
-	map_value = bpf_map_lookup_elem(&task_data, &pid);
+	map_value = bpf_map_lookup_elem(&task_data, (u64*)&pp);
 	if (!map_value)
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
 	ret = create_save_cpumask(&map_value->cpumask);
 	if (ret) {
-		bpf_map_delete_elem(&task_data, &pid);
+          bpf_map_delete_elem(&task_data, (u64*)&pp);
 		return ret;
 	}
 
 	ret = create_save_cpumask(&map_value->tmp_cpumask);
 	if (ret) {
-		bpf_map_delete_elem(&task_data, &pid);
+          bpf_map_delete_elem(&task_data, (u64*)&pp);
 		return ret;
 	}
 
@@ -1602,7 +1604,7 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 	 * deletions aren't reliable means that we sometimes leak task_ctx and
 	 * can't use BPF_NOEXIST on allocation in .prep_enable().
 	 */
-	ret = bpf_map_delete_elem(&task_data, &pid);
+	ret = bpf_map_delete_elem(&task_data, (u64*)&p);
 	if (ret) {
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return;
