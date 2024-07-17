@@ -1983,6 +1983,9 @@ struct sched_ext_entity {
 	unsigned long runnable_at;
 	u64 ddsp_dsq_id;
 	u64 ddsp_enq_flags;
+        u32 last_cb_called;
+        u32 last_cb_called_idx;
+        u32 last_cb_calleds[4];
 	u64 slice;
 	u64 dsq_vtime;
 	bool disallow;

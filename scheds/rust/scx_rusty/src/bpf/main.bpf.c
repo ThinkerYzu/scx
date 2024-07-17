@@ -190,6 +190,8 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	taskc = try_lookup_task_ctx(p);
 	if (!taskc)
 		scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
+        if (taskc && taskc->pid != p->pid)
+                scx_bpf_error("task_ctx pid mismatch %d != %d", taskc->pid, p->pid);
 
 	return taskc;
 }
@@ -1281,6 +1283,8 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
+        if (wakee_ctx->addr != p)
+            scx_bpf_error("runnable wakee_ctx addr mismatch %px(%u) != %px(%u) taskc %px", wakee_ctx->addr, wakee_ctx->pid, p, p->pid, wakee_ctx);
 
 	if (wakee_ctx->runnable)
 		scx_bpf_error("%s[%d] was already runnable", p->comm, p->pid);
@@ -1289,6 +1293,7 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	if (wakee_ctx->last_cb_called != 0 && wakee_ctx->last_cb_called != 4)
 		scx_bpf_error("%s[%d] unexpected runnable last cb %u", p->comm, p->pid, wakee_ctx->last_cb_called);
 	wakee_ctx->last_cb_called = 1;
+        wakee_ctx->last_cb_calleds[(wakee_ctx->last_cb_called_idx++)%4] = 1;
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(p, wakee_ctx, now, true);
@@ -1302,6 +1307,8 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	waker = bpf_get_current_task_btf();
 	if (!(waker_ctx = try_lookup_task_ctx(waker)))
 		return;
+        if (waker_ctx && waker_ctx->pid != waker->pid)
+                scx_bpf_error("waker_ctx pid mismatch %d != %d", waker_ctx->pid, waker->pid);
 
 	interval = now - waker_ctx->last_woke_at;
 	waker_ctx->waker_freq = update_freq(waker_ctx->waker_freq, interval);
@@ -1331,6 +1338,8 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+        if (taskc->addr != p)
+            scx_bpf_error("running taskc addr mismatch %px(%u) != %px(%u) taskc %px", taskc->addr, taskc->pid, p, p->pid, taskc);
 
 	dom_id = taskc->dom_id;
 	if (dom_id >= MAX_DOMS) {
@@ -1372,6 +1381,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (taskc->last_cb_called != 1 && taskc->last_cb_called != 3)
 		scx_bpf_error("%s[%d] unexpected running last cb %u", p->comm, p->pid, taskc->last_cb_called);
 	taskc->last_cb_called = 2;
+        taskc->last_cb_calleds[(taskc->last_cb_called_idx++)%4] = 2;
 }
 
 static void stopping_update_vtime(struct task_struct *p,
@@ -1404,13 +1414,16 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+        if (taskc->addr != p)
+            scx_bpf_error("stopping taskc addr mismatch %px(%u) != %px(%u) taskc %px", taskc->addr, taskc->pid, p, p->pid, taskc);
 
 	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
 		return;
 
 	stopping_update_vtime(p, taskc, domc);
 	if (taskc->last_cb_called != 2)
-		scx_bpf_error("%s[%d] unexpected stopping last cb %u", p->comm, p->pid, taskc->last_cb_called);
+          scx_bpf_error("unexpected stopping last_cb_called %u (%u: %u %u %u %u) (%u: %u %u %u %u)", taskc->last_cb_called, taskc->last_cb_called_idx, taskc->last_cb_calleds[0], taskc->last_cb_calleds[1], taskc->last_cb_calleds[2], taskc->last_cb_calleds[3], p->scx.last_cb_called_idx, p->scx.last_cb_calleds[0], p->scx.last_cb_calleds[1], p->scx.last_cb_calleds[2], p->scx.last_cb_calleds[3]);
+        taskc->last_cb_calleds[(taskc->last_cb_called_idx++)%4] = 3;
 	taskc->last_cb_called = 3;
 }
 
@@ -1422,6 +1435,8 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+        if (taskc->addr != p)
+            scx_bpf_error("quiescent taskc addr mismatch %px(%u) != %px(%u) taskc %px", taskc->addr, taskc->pid, p, p->pid, taskc);
 
 	if (!taskc->runnable)
 		scx_bpf_error("%s[%d] Quiescent called twice (%u, %d)", p->comm, p->pid, taskc->last_cb_called, taskc->runnable_called);
@@ -1430,6 +1445,7 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 		scx_bpf_error("%s[%d] unexpected quiescent last cb %u", p->comm, p->pid, taskc->last_cb_called);
 	taskc->runnable = false;
 	taskc->last_cb_called = 4;
+        taskc->last_cb_calleds[(taskc->last_cb_called_idx++)%4] = 4;
 	task_load_adj(p, taskc, now, false);
 	dom_dcycle_adj(p, taskc->dom_id, taskc->weight, now, false);
 
@@ -1573,14 +1589,22 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
+        if (map_value->addr)
+                scx_bpf_error("map_value addr already set %px", map_value->addr);
+        bpf_printk("init_task %px %px(%u)", map_value, p, pid);
+        map_value->pid = pid;
+        map_value->addr = p;
+
 	ret = create_save_cpumask(&map_value->cpumask);
 	if (ret) {
+          bpf_printk("init_task delete %px(%u)", p, pid);
 		bpf_map_delete_elem(&task_data, &pid);
 		return ret;
 	}
 
 	ret = create_save_cpumask(&map_value->tmp_cpumask);
 	if (ret) {
+          bpf_printk("init_task delete %px(%u)", p, pid);
 		bpf_map_delete_elem(&task_data, &pid);
 		return ret;
 	}
@@ -1607,6 +1631,7 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return;
 	}
+        bpf_printk("exit_task %px(%u)", p, pid);
 }
 
 static s32 create_node(u32 node_id)

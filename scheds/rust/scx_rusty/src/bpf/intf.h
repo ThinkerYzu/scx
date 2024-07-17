@@ -102,6 +102,10 @@ struct task_ctx {
 	bool runnable;
 	bool runnable_called;
 	u32 last_cb_called;
+        u32			last_cb_called_idx;
+        u32			last_cb_calleds[4];
+        void *addr;
+        int pid;
 	u64 dom_active_pids_gen;
 	u64 deadline;
 
